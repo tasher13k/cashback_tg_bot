@@ -1,23 +1,50 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ConversationHandler, CallbackContext
-from telegram.ext import PicklePersistence
-import os
+#from telegram.ext import PicklePersistence
+import requests # for OCR
+import base64
+import os # for tg-token
 
 # Состояния для ConversationHandler
 ADD_CARD_2, ADD_CARD_3, ADD_CASHBACK_2, ADD_CASHBACK_3, EDIT_CARD_2, EDIT_CARD_3, EDIT_CARD_4 = range(7)
 
-# Инициализация
-card_list = []
-
 class Card:
+    """Модель данных карты"""
     def __init__(self, bank_name, card_name):
         self.bank = bank_name
         self.name = card_name
         self.cashback_dict = {}
-    
-    
+
 # Пример баз данных
 banks = ["Сбербанк", "Тинькофф", "ВТБ", "Альфа-Банк"]  # Это может быть динамическая база
+
+# OCR Yandex cloud
+vision_url = 'https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText'
+iam_token = os.getenv('IAM_TOKEN')
+folder_id = os.getenv('YC_FOLDER_ID')
+
+
+def image_analyze(vision_url, iam_token, folder_id, image_data):
+    response = requests.post(vision_url, headers={'Authorization': 'Bearer '+iam_token, 'x-folder-id': folder_id}, json={
+        "mimeType": "image",
+        "languageCodes": ["ru"],
+        "model": "page",
+        "content": image_data
+        })
+    #return response.json()
+    blocks = response.json()['result']['textAnnotation']['blocks']
+    text = ''
+    for block in blocks:
+        for line in block['lines']:
+            for word in line['words']:
+                text += word['text'] + ' '
+            text += '\n'
+    return text
+
+def get_user_cards(context: ContextTypes.DEFAULT_TYPE):
+    if 'cards' not in context.user_data:
+        context.user_data['cards'] = []
+    return context.user_data['cards']
 
 # Обработчики команд
 
@@ -46,7 +73,7 @@ def suggest_add_card():
 # Список карт пользователя
 async def card_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     restore_state(update, context)
-    global card_list
+    card_list = get_user_cards(context)
     
     if card_list == []:
         message = suggest_add_card()
@@ -79,7 +106,7 @@ async def add_card_1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def add_card_2_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     restore_state(update, context)
     query = update.callback_query
-    context.user_data['bank'] = query.data  # Сохраняем выбранный банк
+    context.user_data['bank_for_adding_card'] = query.data  # Сохраняем выбранный банк
     await query.answer()
 
     await query.edit_message_text(text=f"Вы выбрали банк {query.data}. Пожалуйста, введите название карты.")
@@ -89,21 +116,23 @@ async def add_card_2_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ADD_CARD_3
 
 async def add_card_3_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    global card_list
     restore_state(update, context)
 
-    context.user_data['card'] = update.message.text # временно сохраняем введенное название карты
+    context.user_data['name_for_adding_card'] = update.message.text # временно сохраняем введенное название карты
     
-    save_card_in_list(context)
-    await update.message.reply_text(f"Сохранена карта '{card_list[-1].name}' банка {card_list[-1].bank}")
+    card_list = save_card_in_list(context)
+    await update.message.reply_text(f"Сохранена карта '{card_list[-1].name}' банка {card_list[-1].bank}.\n" \
+                                    "Для просмотра всех карт и категорий введите /card_list")
     return ConversationHandler.END
 
 def save_card_in_list(context: ContextTypes.DEFAULT_TYPE):
-    global card_list
-    bank_name = context.user_data['bank']
-    card_name = context.user_data['card']
+    card_list = get_user_cards(context)
+
+    bank_name = context.user_data['bank_for_adding_card']
+    card_name = context.user_data['name_for_adding_card']
     card_list.append(Card(bank_name, card_name))
-    context.user_data.clear()
+    return card_list
+    #context.user_data.clear()
 
 # обработчик этапов добавления карты
 add_card_conv_handler = ConversationHandler(
@@ -118,7 +147,7 @@ add_card_conv_handler = ConversationHandler(
 
 # Функция добавления категорий кэшбэка к карте
 async def add_cashback_1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    global card_list
+    card_list = get_user_cards(context)
     restore_state(update, context)
 
     if card_list == []:
@@ -139,7 +168,7 @@ async def add_cashback_1_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def add_cashback_2_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     restore_state(update, context)
     query = update.callback_query
-    context.user_data['card'] = int(query.data)  # Сохраняем номер выбранной карты из card_list
+    context.user_data['card_index'] = int(query.data)  # Сохраняем номер выбранной карты из card_list
     await query.answer()
 
     await query.edit_message_text("Отлично! Теперь добавьте категории кэшбэка. "
@@ -150,14 +179,15 @@ async def add_cashback_2_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def add_cashback_3_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     restore_state(update, context)
-    global card_list
+    card_list = get_user_cards(context)
 
-    card_index = context.user_data['card']
+    card_index = context.user_data['card_index']
     #await update.message.reply_text(f"card_index =  {card_index}")
     card_list[card_index].cashback_dict = make_cashlist_from_message(update.message.text) # присваиваем карте словарь кэшбэков от пользователя
     
-    await update.message.reply_text(f"Карте {card_list[card_index].name} присвоен список кэшбэков")
-    context.user_data.clear()
+    await update.message.reply_text(f"Карте {card_list[card_index].name} присвоен список кэшбэков.\n"\
+                                    "Для просмотра всех карт и категорий введите /card_list")
+    #context.user_data.clear()
     return ConversationHandler.END
 
 def make_cashlist_from_message(text) -> dict:
@@ -179,8 +209,8 @@ add_cashback_conv_handler = ConversationHandler(
 
 # Редактирование карты
 async def edit_card_1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    global card_list
     restore_state(update, context)
+    card_list = get_user_cards(context)
 
     if card_list == []:
         message = suggest_add_card()
@@ -225,30 +255,33 @@ async def rename_card(query , context: ContextTypes.DEFAULT_TYPE):
     return EDIT_CARD_4
 
 async def edit_card_4_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global card_list
+    card_list = get_user_cards(context)
+
     new_card_name = update.message.text
     index = context.user_data['selected_card']
     card_list[index].name = new_card_name
 
     await update.message.reply_text(f"Новое имя карты - {card_list[index].name}")
-    context.user_data.clear()
+    #context.user_data.clear()
     return ConversationHandler.END   
 
 
 async def delete_card(query , context: ContextTypes.DEFAULT_TYPE) -> int:
-    global card_list
+    card_list = get_user_cards(context)
+    
     del(card_list[context.user_data['selected_card']])
     await query.edit_message_text("Карта удалена")
-    context.user_data.clear()
+    #context.user_data.clear()
     return ConversationHandler.END
 
 
 async def clear_cashbacks(query, context: ContextTypes.DEFAULT_TYPE) -> int:
-    global card_list
+    card_list = get_user_cards(context)
+
     index = context.user_data['selected_card']
     card_list[index].cashback_dict.clear()
     await query.edit_message_text(f"Список кэшбэков у карты '{card_list[index].name}' удален")
-    context.user_data.clear()
+    #context.user_data.clear()
     return ConversationHandler.END
 
 
@@ -269,18 +302,7 @@ edit_card_conv_handler = ConversationHandler(
 async def process_cashback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cashback_entries = update.message.text.splitlines()
     context.user_data['cashbacks'] = {}
-
-    for entry in cashback_entries:
-        try:
-            category, percent = entry.split()
-            percent = float(percent)
-            if category in categories:
-                context.user_data['cashbacks'][category] = percent
-            else:
-                update.message.reply_text(f"Категория '{category}' не найдена.")
-        except ValueError:
-            update.message.reply_text(f"Ошибка в формате: {entry}. Введите как 'Категория Процент'.")
-            continue
+      
 
     update.message.reply_text(f"Ваши категории кэшбэка для карты '{context.user_data['card_name']}':\n"
                               f"{context.user_data['cashbacks']}")
@@ -294,9 +316,21 @@ def restore_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        restore_state(update, context) 
-        message = "Непонятно состояние!!!\n"
-        await update.message.reply_text(message)
+    restore_state(update, context) 
+    message = "Непонятно состояние!!!\n"
+    await update.message.reply_text(message)
+    
+async def ocr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    photo_info = await update.message.photo[-1].get_file()
+    downloaded_file = await photo_info.download_as_bytearray()
+    #photo_info.download_to_memory()
+
+    #response_text = extract_with_gemini(downloaded_file, photo_info)
+    image_data = base64.b64encode(downloaded_file).decode('utf-8')
+    response_text = image_analyze(vision_url, iam_token, folder_id, image_data)
+    
+    await update.message.reply_text(f"Распознанный текст:\n{response_text}")
+
 
 # Главная функция для запуска бота
 def main() -> None:
@@ -316,6 +350,7 @@ def main() -> None:
 
     # Если непонятно состояние и пришёл текст
     application.add_handler(MessageHandler(filters.TEXT, handle_text))
+    application.add_handler(MessageHandler(filters.PHOTO, ocr_handler))
 
     # Запуск бота
     application.run_polling()
