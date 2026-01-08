@@ -3,6 +3,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 #from telegram.ext import PicklePersistence
 import os # for tg-token
 import ocr_openrouter
+from database import DatabaseService, db_session
 
 # Состояния для ConversationHandler
 ADD_CARD_2, ADD_CARD_3, ADD_CASHBACK_2, ADD_CASHBACK_3, EDIT_CARD_2, EDIT_CARD_3, EDIT_CARD_4 = range(7)
@@ -341,7 +342,9 @@ edit_card_conv_handler = ConversationHandler(
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = "Непонятно состояние!!!\n"
+    #message = "Непонятно состояние!!!\n"
+    with db_session.session() as session:
+        service = DatabaseService(session)
     await update.message.reply_text(message)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
