@@ -99,7 +99,8 @@ async def add_card_3_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     card_list = save_card_in_list(context)
     await update.message.reply_text(f"Сохранена карта '{card_list[-1].name}' банка {card_list[-1].bank}.\n" \
-                                    "Для просмотра всех карт и категорий введите /card_list")
+                                    "Для просмотра всех карт и категорий введите /card_list"
+                                    "Для добавления категорий введите /add_cashback")
     #context.user_data.clear()
     return ConversationHandler.END
 
@@ -342,9 +343,9 @@ edit_card_conv_handler = ConversationHandler(
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    #message = "Непонятно состояние!!!\n"
-    with db_session.session() as session:
-        service = DatabaseService(session)
+    message = "Непонятно состояние!!!\n"
+    #with db_session.session() as session:
+        #service = DatabaseService(session)
     await update.message.reply_text(message)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
